@@ -13,9 +13,16 @@ public static class JourneyEventEndpoints
 
     private static async Task<IResult> HandleAsync(
         JourneyEventRequest request,
+        HttpRequest httpRequest,
         IRecordJourneyEventUseCase useCase,
         CancellationToken cancellationToken)
     {
+        var idempotencyKey = httpRequest.Headers["Idempotency-Key"].ToString();
+        if (string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            return Results.BadRequest(new { error = "Idempotency-Key header is required." });
+        }
+
         if (string.IsNullOrWhiteSpace(request.ConversationId))
         {
             return Results.BadRequest(new { error = "conversationId is required." });
@@ -39,7 +46,7 @@ public static class JourneyEventEndpoints
             Timestamp = request.Timestamp.Value
         };
 
-        var result = await useCase.ExecuteAsync(auditEvent, cancellationToken);
+        var result = await useCase.ExecuteAsync(auditEvent, idempotencyKey, cancellationToken);
 
         return result switch
         {
