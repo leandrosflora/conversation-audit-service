@@ -9,11 +9,13 @@ public class RecordJourneyEventUseCase(
     ILogger<RecordJourneyEventUseCase> logger) : IRecordJourneyEventUseCase
 {
     public async Task<RecordJourneyEventResult> ExecuteAsync(
-        JourneyAuditEvent auditEvent, CancellationToken cancellationToken)
+        JourneyAuditEvent auditEvent,
+        string idempotencyKey,
+        CancellationToken cancellationToken)
     {
         try
         {
-            await repository.InsertAsync(auditEvent, cancellationToken);
+            await repository.InsertAsync(auditEvent, idempotencyKey, cancellationToken);
             return RecordJourneyEventResult.Recorded;
         }
         catch (JourneyEventRepositoryUnavailableException ex)
