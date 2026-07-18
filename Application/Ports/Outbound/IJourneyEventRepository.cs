@@ -5,7 +5,10 @@ namespace conversation_audit_service.Application.Ports.Outbound;
 public interface IJourneyEventRepository
 {
     /// <summary>Throws <see cref="JourneyEventRepositoryUnavailableException"/> if PostgreSQL cannot be reached.</summary>
-    Task InsertAsync(JourneyAuditEvent auditEvent, CancellationToken cancellationToken);
+    Task InsertAsync(
+        JourneyAuditEvent auditEvent,
+        string idempotencyKey,
+        CancellationToken cancellationToken);
 }
 
 public class JourneyEventRepositoryUnavailableException(string message, Exception innerException)
