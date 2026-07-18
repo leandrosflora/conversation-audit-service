@@ -3,17 +3,18 @@ using Npgsql;
 using NpgsqlTypes;
 using conversation_audit_service.Application.Ports.Outbound;
 using conversation_audit_service.Domain;
+using conversation_audit_service.Platform;
 
 namespace conversation_audit_service.Adapters.Outbound.Persistence;
 
-public class PostgresJourneyEventRepository(NpgsqlDataSource dataSource) : IJourneyEventRepository
+public class PostgresJourneyEventRepository(
+    NpgsqlDataSource dataSource,
+    TenantContext tenantContext) : IJourneyEventRepository
 {
-    private static readonly Guid TenantId = Guid.Parse("00000000-0000-0000-0000-000000000001");
     private const string ActorType = "system";
     private const string ActorId = "conversation-orchestrator";
     private const string Action = "conversation.journey_processed";
     private const string ResourceType = "conversation";
-
     private readonly SemaphoreSlim _schemaLock = new(1, 1);
     private volatile bool _schemaReady;
 
@@ -30,16 +31,16 @@ public class PostgresJourneyEventRepository(NpgsqlDataSource dataSource) : IJour
         string idempotencyKey,
         CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.Serialize(new { intent = auditEvent.Intent, outcome = auditEvent.Outcome });
+        if (!Guid.TryParse(tenantContext.TenantId, out var tenantId))
+            throw new ArgumentException("X-Tenant-Id must be a UUID.");
 
+        var payload = JsonSerializer.Serialize(new { intent = auditEvent.Intent, outcome = auditEvent.Outcome });
         try
         {
             await EnsureSchemaAsync(cancellationToken);
-
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(InsertSql, connection);
-
-            command.Parameters.AddWithValue("tenant_id", TenantId);
+            command.Parameters.AddWithValue("tenant_id", tenantId);
             command.Parameters.AddWithValue("actor_type", ActorType);
             command.Parameters.AddWithValue("actor_id", ActorId);
             command.Parameters.AddWithValue("action", Action);
@@ -48,7 +49,6 @@ public class PostgresJourneyEventRepository(NpgsqlDataSource dataSource) : IJour
             command.Parameters.Add(new NpgsqlParameter("payload", NpgsqlDbType.Jsonb) { Value = payload });
             command.Parameters.AddWithValue("created_at", auditEvent.Timestamp);
             command.Parameters.AddWithValue("idempotency_key", idempotencyKey);
-
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is NpgsqlException or TimeoutException)
@@ -59,35 +59,21 @@ public class PostgresJourneyEventRepository(NpgsqlDataSource dataSource) : IJour
 
     private async Task EnsureSchemaAsync(CancellationToken cancellationToken)
     {
-        if (_schemaReady)
-        {
-            return;
-        }
-
+        if (_schemaReady) return;
         await _schemaLock.WaitAsync(cancellationToken);
         try
         {
-            if (_schemaReady)
-            {
-                return;
-            }
-
+            if (_schemaReady) return;
             const string sql = """
-                ALTER TABLE ops.audit_events
-                    ADD COLUMN IF NOT EXISTS idempotency_key text;
-
+                ALTER TABLE ops.audit_events ADD COLUMN IF NOT EXISTS idempotency_key text;
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_events_idempotency_key
                     ON ops.audit_events (idempotency_key);
                 """;
-
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(sql, connection);
             await command.ExecuteNonQueryAsync(cancellationToken);
             _schemaReady = true;
         }
-        finally
-        {
-            _schemaLock.Release();
-        }
+        finally { _schemaLock.Release(); }
     }
 }
