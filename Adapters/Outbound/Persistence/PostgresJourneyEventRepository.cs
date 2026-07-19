@@ -66,8 +66,7 @@ public class PostgresJourneyEventRepository(
                 ALTER TABLE ops.audit_events ADD COLUMN IF NOT EXISTS idempotency_key text;
                 DROP INDEX IF EXISTS ops.ux_audit_events_idempotency_key;
                 CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_events_tenant_idempotency_key
-                    ON ops.audit_events (tenant_id, idempotency_key)
-                    WHERE idempotency_key IS NOT NULL;
+                    ON ops.audit_events (tenant_id, idempotency_key);
                 """;
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(sql, connection);
