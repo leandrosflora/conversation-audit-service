@@ -6,6 +6,15 @@
     <RootNamespace>conversation_audit_service</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <!-- conversation-audit-service.Tests lives inside this project's directory tree - the
+         SDK's default glob would otherwise sweep its .cs files into this project's compile
+         items too. -->
+    <Compile Remove="conversation-audit-service.Tests\**" />
+    <Content Remove="conversation-audit-service.Tests\**" />
+    <EmbeddedResource Remove="conversation-audit-service.Tests\**" />
+    <None Remove="conversation-audit-service.Tests\**" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.28" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.28" />
     <PackageReference Include="Npgsql" Version="8.0.6" />
