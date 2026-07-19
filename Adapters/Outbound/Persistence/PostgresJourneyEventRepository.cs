@@ -23,7 +23,7 @@ public class PostgresJourneyEventRepository(
             (tenant_id, actor_type, actor_id, action, resource_type, resource_id, payload, created_at, idempotency_key)
         VALUES
             (@tenant_id, @actor_type, @actor_id, @action, @resource_type, @resource_id, @payload::jsonb, @created_at, @idempotency_key)
-        ON CONFLICT (idempotency_key) DO NOTHING;
+        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING;
         """;
 
     public async Task InsertAsync(
@@ -31,9 +31,7 @@ public class PostgresJourneyEventRepository(
         string idempotencyKey,
         CancellationToken cancellationToken)
     {
-        if (!Guid.TryParse(tenantContext.TenantId, out var tenantId))
-            throw new ArgumentException("X-Tenant-Id must be a UUID.");
-
+        var tenantId = Guid.Parse(tenantContext.TenantId);
         var payload = JsonSerializer.Serialize(new { intent = auditEvent.Intent, outcome = auditEvent.Outcome });
         try
         {
@@ -66,14 +64,19 @@ public class PostgresJourneyEventRepository(
             if (_schemaReady) return;
             const string sql = """
                 ALTER TABLE ops.audit_events ADD COLUMN IF NOT EXISTS idempotency_key text;
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_events_idempotency_key
-                    ON ops.audit_events (idempotency_key);
+                DROP INDEX IF EXISTS ops.ux_audit_events_idempotency_key;
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_events_tenant_idempotency_key
+                    ON ops.audit_events (tenant_id, idempotency_key)
+                    WHERE idempotency_key IS NOT NULL;
                 """;
             await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
             await using var command = new NpgsqlCommand(sql, connection);
             await command.ExecuteNonQueryAsync(cancellationToken);
             _schemaReady = true;
         }
-        finally { _schemaLock.Release(); }
+        finally
+        {
+            _schemaLock.Release();
+        }
     }
 }
