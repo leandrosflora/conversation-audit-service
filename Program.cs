@@ -54,7 +54,11 @@ app.MapGet("/health/ready", async (
     CancellationToken cancellationToken) =>
 {
     var failures = new List<string>();
-    if (string.IsNullOrWhiteSpace(authOptions.Value.SigningKey)) failures.Add("internal_auth_signing_key_missing");
+    if (!InternalAuthOptions.HasValidSecret(
+            authOptions.Value.InboundSecrets.GetValueOrDefault("conversation-orchestrator")))
+    {
+        failures.Add("internal_auth_inbound_secret_missing:conversation-orchestrator");
+    }
     try
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
