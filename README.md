@@ -6,11 +6,14 @@ A API recebe informações sobre a conversa, intenção, resultado e data do pro
 
 ## O que este serviço faz
 
-- Recebe eventos de jornada pelo endpoint `POST /journey-events`.
+- Recebe eventos de jornada pelo endpoint `POST /journey-events`, autenticado com JWT interno.
+- Resolve o tenant a partir da claim assinada `tenant_id` (validada contra o header `X-Tenant-Id`), não mais de um valor fixo.
+- Exige um header `Idempotency-Key`, persistido com constraint única por `(tenant_id, idempotency_key)` — reenvio da mesma chave não duplica o evento.
 - Valida o identificador da conversa, o resultado e o timestamp do evento.
 - Registra o evento na tabela `ops.audit_events`.
 - Armazena `intent` e `outcome` em uma coluna JSONB.
 - Retorna `503 Service Unavailable` quando o PostgreSQL não está acessível.
+- Expõe `GET /health/ready`.
 - Exporta traces do ASP.NET Core e do Npgsql por OTLP.
 - Adiciona `TraceId`, `SpanId` e `ParentId` aos logs da aplicação.
 
@@ -74,6 +77,9 @@ sequenceDiagram
 ```http
 POST /journey-events
 Content-Type: application/json
+Authorization: Bearer <jwt-interno>
+X-Tenant-Id: <tenant>
+Idempotency-Key: <chave-estável-por-evento>
 ```
 
 #### Corpo da solicitação
@@ -98,8 +104,10 @@ Content-Type: application/json
 
 | Status | Significado |
 |---:|---|
-| `202 Accepted` | O evento foi persistido com sucesso. |
-| `400 Bad Request` | `conversationId`, `outcome` ou `timestamp` não foi informado corretamente. |
+| `202 Accepted` | O evento foi persistido com sucesso (ou já havia sido, para a mesma `Idempotency-Key`). |
+| `400 Bad Request` | `conversationId`, `outcome`, `timestamp` ou `Idempotency-Key` não foi informado corretamente. |
+| `401 Unauthorized` | JWT ausente, inválido ou expirado. |
+| `403 Forbidden` | `X-Tenant-Id` não é UUID ou não bate com a claim `tenant_id` assinada. |
 | `503 Service Unavailable` | O PostgreSQL está indisponível ou excedeu o timeout. |
 | `500 Internal Server Error` | Ocorreu uma falha inesperada na aplicação. |
 
@@ -109,6 +117,9 @@ Content-Type: application/json
 curl --request POST \
   --url http://localhost:5021/journey-events \
   --header 'Content-Type: application/json' \
+  --header 'Authorization: Bearer <jwt-interno>' \
+  --header 'X-Tenant-Id: 00000000-0000-0000-0000-000000000001' \
+  --header 'Idempotency-Key: conversation-12345:journey_completed' \
   --data '{
     "conversationId": "conversation-12345",
     "intent": "renegociar_divida",
@@ -123,14 +134,15 @@ A implementação atual converte o evento recebido para o modelo genérico da ta
 
 | Coluna | Valor persistido |
 |---|---|
-| `tenant_id` | `00000000-0000-0000-0000-000000000001` |
-| `actor_type` | `system` |
-| `actor_id` | `conversation-orchestrator` |
-| `action` | `conversation.journey_processed` |
-| `resource_type` | `conversation` |
+| `tenant_id` | Resolvido da claim `tenant_id` assinada no JWT (validada contra `X-Tenant-Id`) |
+| `actor_type` | `system` (fixo) |
+| `actor_id` | `conversation-orchestrator` (fixo) |
+| `action` | `conversation.journey_processed` (fixo) |
+| `resource_type` | `conversation` (fixo) |
 | `resource_id` | Valor recebido em `conversationId` |
 | `payload` | JSON contendo `intent` e `outcome` |
 | `created_at` | Valor recebido em `timestamp` |
+| `idempotency_key` | Valor recebido no header, com constraint única por `(tenant_id, idempotency_key)` |
 
 Exemplo do conteúdo persistido em `payload`:
 
@@ -142,7 +154,7 @@ Exemplo do conteúdo persistido em `payload`:
 ```
 
 > [!IMPORTANT]
-> `tenant_id`, `actor_type`, `actor_id`, `action` e `resource_type` são valores fixos no código. Atualmente, o cliente não pode alterar esse mapeamento pela API.
+> `actor_type`, `actor_id`, `action` e `resource_type` continuam fixos no código — apenas `tenant_id` passou a ser dinâmico (derivado do token). O cliente ainda não pode alterar `actor`/`action` pela API.
 
 O banco de dados deve possuir previamente:
 
@@ -160,6 +172,9 @@ A configuração pode ser fornecida por `appsettings.json`, arquivos específico
 |---|---|---|
 | Connection string do PostgreSQL | `Postgres__ConnectionString` | `Host=localhost;Port=5432;Database=conversational_ai;Username=postgres;Password=postgres` |
 | Endpoint OTLP | `Otel__OtlpEndpoint` | `http://localhost:4317` |
+| Chave de assinatura JWT interna | `InternalAuth__SigningKey` | (vazio — obrigatório, mínimo 32 bytes) |
+| Emissor do JWT | `InternalAuth__Issuer` | `conversational-ai-platform` |
+| Audiência esperada | `InternalAuth__ServiceName` | `conversation-audit-service` |
 
 Os timeouts de conexão e execução de comandos no PostgreSQL são limitados a cinco segundos. Dessa forma, falhas de banco são convertidas rapidamente em `503 Service Unavailable`.
 
@@ -169,6 +184,7 @@ Os timeouts de conexão e execução de comandos no PostgreSQL são limitados a 
 
 - .NET 8 SDK.
 - PostgreSQL com o schema e a tabela necessários.
+- `InternalAuth__SigningKey` com pelo menos 32 bytes, igual ao configurado nos serviços que chamam este.
 - Coletor compatível com OTLP, como Jaeger ou OpenTelemetry Collector, quando a exportação de traces for necessária.
 
 ### Iniciar o serviço
@@ -277,32 +293,40 @@ O span do PostgreSQL é especialmente relevante porque a disponibilidade e a lat
 │   └── PostgresOptions.cs
 ├── Domain
 │   └── JourneyAuditEvent.cs
+├── Platform
+│   └── PlatformServices.cs
 ├── Program.cs
 ├── appsettings.json
 ├── Dockerfile
-└── conversation-audit-service.csproj
+├── conversation-audit-service.csproj
+└── conversation-audit-service.Tests/
 ```
+
+## Testes
+
+```bash
+dotnet test
+```
+
+`conversation-audit-service.Tests` inclui testes de integração contra um PostgreSQL real via Testcontainers, montando o script de init real de `conversational-ai-demo-arch/database/conversational-ai-postgres-init.sql` (não um schema de teste à parte) — ver a nota de CI abaixo sobre por que isso exige um checkout adicional.
+
+## CI
+
+`.github/workflows/ci.yml` roda `dotnet build`/`dotnet test` a cada push/PR para `master`. Como os testes de repositório usam Testcontainers com o init script real do `conversational-ai-demo-arch`, o workflow faz um segundo `actions/checkout` desse repo (aninhado no workspace) antes de rodar os testes — sem isso, o teste falha com "Could not locate conversational-ai-postgres-init.sql".
 
 ## Limitações atuais
 
-- O tenant é fixo para todos os eventos.
-- O ator é sempre identificado como `conversation-orchestrator`.
-- A ação é sempre `conversation.journey_processed`.
-- Não existe autenticação ou autorização.
-- Não existe mecanismo de idempotência.
-- As migrações de banco são gerenciadas fora deste repositório.
-- Não existem endpoints de health check.
-- Falhas de persistência não possuem retry.
+- O ator é sempre identificado como `conversation-orchestrator`; a ação é sempre `conversation.journey_processed` (ambos fixos no código).
+- As migrações de banco são gerenciadas fora deste repositório (o schema/tabela usados em produção vêm do `conversational-ai-postgres-init.sql` de `conversational-ai-demo-arch`).
+- Falhas de persistência não possuem retry (o chamador, `conversation-orchestrator`, é quem retenta via seu outbox).
 - O endpoint não impõe um catálogo de valores permitidos para `intent` ou `outcome`.
 - Não há validação explícita para timestamps futuros ou excessivamente antigos.
 
 ## Próximos passos recomendados
 
-1. Tornar tenant, ator e ação derivados do contexto autenticado ou do evento.
-2. Adicionar autenticação, autorização e rate limiting.
-3. Implementar idempotência para impedir eventos duplicados.
-4. Adicionar migrações de banco e testes de integração.
-5. Criar health checks de readiness e liveness.
-6. Adicionar políticas de resiliência e métricas operacionais.
-7. Validar o catálogo de eventos, intenções e resultados aceitos.
-8. Definir uma política de retenção e proteção dos dados de auditoria.
+1. Tornar ator e ação deriváveis do contexto autenticado ou do evento, em vez de fixos.
+2. Adicionar rate limiting.
+3. Adicionar migrações de banco versionadas neste repositório.
+4. Adicionar políticas de resiliência e métricas operacionais.
+5. Validar o catálogo de eventos, intenções e resultados aceitos.
+6. Definir uma política de retenção e proteção dos dados de auditoria.
