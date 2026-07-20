@@ -172,9 +172,11 @@ A configuração pode ser fornecida por `appsettings.json`, arquivos específico
 |---|---|---|
 | Connection string do PostgreSQL | `Postgres__ConnectionString` | `Host=localhost;Port=5432;Database=conversational_ai;Username=postgres;Password=postgres` |
 | Endpoint OTLP | `Otel__OtlpEndpoint` | `http://localhost:4317` |
-| Chave de assinatura JWT interna | `InternalAuth__SigningKey` | (vazio — obrigatório, mínimo 32 bytes) |
+| Segredo inbound para o chamador `conversation-orchestrator` | `InternalAuth__InboundSecrets__conversation-orchestrator` | (vazio — obrigatório, mínimo 32 bytes) |
 | Emissor do JWT | `InternalAuth__Issuer` | `conversational-ai-platform` |
 | Audiência esperada | `InternalAuth__ServiceName` | `conversation-audit-service` |
+
+> Este serviço só recebe chamadas internas (de `conversation-orchestrator`); não emite tokens para outro serviço, então `InternalAuth__OutboundSecrets__*` não é usado hoje. A validação do JWT recebido usa o header `kid` do token para selecionar o segredo em `InboundSecrets` — o `kid` precisa ser igual ao `sub` do token (`conversation-orchestrator`).
 
 Os timeouts de conexão e execução de comandos no PostgreSQL são limitados a cinco segundos. Dessa forma, falhas de banco são convertidas rapidamente em `503 Service Unavailable`.
 
@@ -184,7 +186,7 @@ Os timeouts de conexão e execução de comandos no PostgreSQL são limitados a 
 
 - .NET 8 SDK.
 - PostgreSQL com o schema e a tabela necessários.
-- `InternalAuth__SigningKey` com pelo menos 32 bytes, igual ao configurado nos serviços que chamam este.
+- `InternalAuth__InboundSecrets__conversation-orchestrator` com pelo menos 32 bytes, igual ao configurado como segredo outbound (`InternalAuth__OutboundSecrets__conversation-audit-service`) em `conversation-orchestrator`.
 - Coletor compatível com OTLP, como Jaeger ou OpenTelemetry Collector, quando a exportação de traces for necessária.
 
 ### Iniciar o serviço
